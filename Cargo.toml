@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 openapiv3 = "0.3"
-quote = "1.0"
+quote = "1.0.2"
 serde_yaml = "0.8"
 proc-macro2 = "1.0"
 Inflector = "0.11"
