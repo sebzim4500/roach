@@ -5,8 +5,11 @@ use std::io::{Read, Write};
 use openapiv3::OpenAPI;
 use proc_macro2::TokenStream;
 use std::process::{Command, Stdio};
+use crate::spec::Spec;
+use quote::ToTokens;
 
 mod codegen;
+mod spec;
 
 pub fn generate_code_from_file(input: impl AsRef<Path>, output: impl AsRef<Path>) -> io::Result<()> {
     let path_ref = input.as_ref();
@@ -19,8 +22,9 @@ pub fn generate_code_from_file(input: impl AsRef<Path>, output: impl AsRef<Path>
 }
 
 fn generate(code: &str) -> String {
-    let spec: OpenAPI = serde_yaml::from_str(code).unwrap();
-    codegen::generate(spec).to_string()
+    let open_api: OpenAPI = serde_yaml::from_str(code).unwrap();
+    let spec = Spec::from_open_api(&open_api);
+    spec.to_token_stream().to_string()
 }
 
 fn format(code: &str) -> Vec<u8> {
