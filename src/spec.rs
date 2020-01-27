@@ -1,4 +1,4 @@
-use openapiv3::{OpenAPI, Components, SchemaKind, Type, ReferenceOr, ObjectType, Schema, Paths, PathItem, Operation, MediaType, ParameterSchemaOrContent};
+use openapiv3::{OpenAPI, Components, SchemaKind, Type, ReferenceOr, ObjectType, Schema, Paths, PathItem, Operation, MediaType, ParameterSchemaOrContent, StatusCode, Responses};
 use inflector::cases::{snakecase::to_snake_case, pascalcase::to_pascal_case};
 
 #[derive(Default)]
@@ -20,6 +20,12 @@ pub struct Endpoint {
     pub path: String,
     pub parameters: Vec<Parameter>,
     pub request_body: Option<RequestBody>,
+    pub success_response: Response,
+}
+
+pub struct Response {
+    pub status_code: u16,
+    pub response_type: Option<String>,
 }
 
 pub struct Parameter {
@@ -27,6 +33,13 @@ pub struct Parameter {
     pub original_name: String,
     pub type_name: String,
     pub required: bool,
+    pub parameter_type: ParameterType,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum ParameterType {
+    Path,
+    Query,
 }
 
 pub struct RequestBody {
@@ -40,7 +53,7 @@ pub struct TypeDefinition {
 }
 
 pub enum TypeKind {
-    Alias(ScalarType),
+    Alias(String),
     Object {
         properties: Vec<Property>
     },
@@ -89,27 +102,52 @@ impl<'s> SpecGenerator<'s> {
     fn generate_components(&mut self, components: &Components) {
         for (name, schema_or_ref) in &components.schemas {
             if let ReferenceOr::Item(schema) = schema_or_ref {
-                self.generate_schema(&name, schema)
+                self.generate_schema(&name, schema, false);
             }
         }
     }
 
-    fn generate_schema(&mut self, name: &str, schema: &Schema) {
+    fn generate_schema(&mut self, name: &str, schema: &Schema, inline: bool) -> String {
         match &schema.schema_kind {
             SchemaKind::Type(Type::Object(object)) => {
                 self.generate_object(&name, object);
+                name.to_string()
             }
             SchemaKind::Type(Type::String(string_type)) if !string_type.enumeration.is_empty() => {
                 self.generate_enum(&name, string_type.enumeration.as_slice());
+                name.to_string()
             }
             SchemaKind::Type(Type::String(string_type)) => {
-                self.spec.type_definitions.push(TypeDefinition {
-                    name: to_pascal_case(&name),
-                    kind: TypeKind::Alias(ScalarType::String)
-                })
+                if inline {
+                    "String".to_string()
+                } else {
+                    self.spec.type_definitions.push(TypeDefinition {
+                        name: to_pascal_case(&name),
+                        kind: TypeKind::Alias("String".to_string())
+                    });
+                    name.to_string()
+                }
+            }
+            SchemaKind::Type(Type::Array(array_type)) => {
+                if inline {
+                    let element_name = format!("{}Element", name);
+                    format!("Vec<{}>", self.generate_type_name(&array_type.items.clone().unbox()))
+                } else {
+                    unimplemented!("array aliases")
+                }
             }
             SchemaKind::OneOf { one_of } => {
-                // TODO generate this
+                // TODO actually generate an enum or something
+                if inline {
+                    "()".to_string()
+                } else {
+                    self.spec.type_definitions.push(TypeDefinition {
+                        name: to_pascal_case(&name),
+                        kind: TypeKind::Alias("()".to_string()),
+                    });
+                    name.to_string()
+
+                }
             }
             kind => unimplemented!("Unknown outer schema kind {:?}", kind)
         }
@@ -208,11 +246,46 @@ impl<'s> SpecGenerator<'s> {
                 }
             }).collect();
 
+            let success_response = operation.responses.responses.get(&StatusCode::Code(200)).map(|resp| (200, resp))
+                .or(operation.responses.responses.get(&StatusCode::Code(204)).map(|resp| (204, resp)))
+                .map(|(code, parameter_or_ref)| {
+                    match parameter_or_ref {
+                        ReferenceOr::Reference { reference} => if reference.starts_with(RESPONSE_PREFIX) {
+                            let response = &self.open_api.components.as_ref().unwrap().responses[&reference[RESPONSE_PREFIX.len()..]];
+                            match response {
+                                ReferenceOr::Item(item) => (code, item),
+                                ReferenceOr::Reference { .. } => unimplemented!()
+                            }
+                        } else {
+                            unimplemented!()
+                        },
+                        ReferenceOr::Item(item) => (code, item),
+                    }
+                })
+                .map(|(code, response): (u16, &openapiv3::Response)| {
+                    let response_type = response.content.get(APPLICATION_JSON_CONTENT_TYPE)
+                        .and_then(|content: &MediaType| content.schema.as_ref())
+                        .map(|schema: &ReferenceOr<Schema>| {
+                            match schema {
+                                ReferenceOr::Reference { reference } => type_from_reference(reference),
+                                ReferenceOr::Item(item) => {
+                                    let body_name = format!("{}Response", to_pascal_case(&name));
+                                    self.generate_schema(&body_name, item, true)
+                                },
+                            }
+                        });
+                    Response {
+                        status_code: code,
+                        response_type,
+                    }
+                }).unwrap();
+
             self.spec.endpoints.push(Endpoint {
                 name,
                 path: url,
                 parameters,
-                request_body
+                request_body,
+                success_response,
             });
         }
     }
@@ -225,6 +298,7 @@ impl<'s> SpecGenerator<'s> {
                     original_name: parameter_data.name.clone(),
                     type_name: self.generate_type_name(from_parameter_schema(&parameter_data.format)),
                     required: parameter_data.required,
+                    parameter_type: ParameterType::Query,
                 }
             }
             openapiv3::Parameter::Header { .. } => unimplemented!(),
@@ -234,6 +308,7 @@ impl<'s> SpecGenerator<'s> {
                     original_name: parameter_data.name.clone(),
                     type_name: self.generate_type_name(from_parameter_schema(&parameter_data.format)),
                     required: parameter_data.required,
+                    parameter_type: ParameterType::Path,
                 }
             },
             openapiv3::Parameter::Cookie { .. } => unimplemented!(),
@@ -253,7 +328,7 @@ impl<'s> SpecGenerator<'s> {
                 },
                 ReferenceOr::Item(item) => {
                     let body_name = format!("{}Body", to_pascal_case(endpoint_name));
-                    self.generate_schema(&body_name, item);
+                    self.generate_schema(&body_name, item, true);
                     Some(RequestBody {
                         required: request_body.required,
                         type_name: body_name
@@ -280,6 +355,7 @@ fn to_property_name(outer_name: &str, field_name: &str) -> String {
 const SCHEMA_PREFIX: &str = "#/components/schemas/";
 const REQUEST_BODY_PREFIX: &str = "#/components/requestBodies/";
 const PARAMETER_PREFIX: &str = "#/components/parameters/";
+const RESPONSE_PREFIX: &str = "#/components/responses/";
 const APPLICATION_JSON_CONTENT_TYPE: &str = "application/json";
 
 fn type_from_reference(reference: &str) -> String {

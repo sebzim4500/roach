@@ -3,7 +3,8 @@ use proc_macro2::{TokenStream, Ident};
 use quote::{quote, ToTokens, format_ident, TokenStreamExt};
 use inflector::cases::snakecase::to_snake_case;
 use inflector::cases::pascalcase::to_pascal_case;
-use crate::spec::{Spec, TypeDefinition, TypeKind, ScalarType, Property, Variant, Endpoint};
+use crate::spec::{Spec, TypeDefinition, TypeKind, ScalarType, Property, Variant, Endpoint, ParameterType};
+use std::str::FromStr;
 //
 //trait ToTokens {
 //    fn to_tokens(&self, tokens: &mut TokenStream);
@@ -17,6 +18,7 @@ impl ToTokens for Spec {
         (quote! {
             use serde::{Serialize, Deserialize};
             use tower_service::Service;
+            use std::fmt::Write;
 
             #[derive(Clone)]
             pub struct Client<S: Service<hyper::Request<hyper::Body>>> {
@@ -26,7 +28,9 @@ impl ToTokens for Spec {
 
             #(#type_definitions)*
 
-            impl<S> Client<S> where S: Service<hyper::Request<hyper::Body>, Response = hyper::Response<hyper::Body>> {
+            impl<S> Client<S> where
+                    S: Service<hyper::Request<hyper::Body>, Response = hyper::Response<hyper::Body>>,
+                    S::Error: From<hyper::Error>, {
                 pub fn new(service: S, base_path: String) -> Self {
                     Self { service, base_path }
                 }
@@ -42,15 +46,18 @@ impl ToTokens for TypeDefinition {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let ident = format_ident!("{}", self.name);
         let result = match &self.kind {
-            TypeKind::Alias(type_name) => quote! { type #ident = #type_name; },
+            TypeKind::Alias(type_name) => {
+                let type_ident = TokenStream::from_str(&type_name).unwrap();
+                quote! { type #ident = #type_ident; }
+            },
             TypeKind::Object { properties } => quote! {
-                #[derive(Serialize, Deserialize)]
+                #[derive(Serialize, Deserialize, Debug, Clone)]
                 pub struct #ident {
                     #(#properties),*
                 }
             },
             TypeKind::Enum { variants } => quote! {
-                #[derive(Serialize, Deserialize)]
+                #[derive(Serialize, Deserialize, Debug, Clone)]
                 pub enum #ident {
                     #(#variants),*
                 }
@@ -134,10 +141,67 @@ impl ToTokens for Endpoint {
             quote! { let mut request = hyper::Request::new(hyper::Body::empty()); }
         };
 
-        let result = quote! {
-            pub async fn #ident(&mut self, #(#parameters,)* #(#body),*) {
-                #request_initializer
+        let path = &self.path;
 
+        let query_params = self.parameters.iter()
+            .filter(|p| p.parameter_type == ParameterType::Query)
+            .map(|p| {
+                let param_name = &p.original_name;
+                let param_ident = format_ident!("{}", p.name);
+                let write_param = quote! {
+                    if is_first_query_param {
+                        uri_string.push_str("?");
+                        is_first_query_param = false;
+                    } else {
+                        uri_string.push_str("&");
+                    }
+                    uri_string.push_str(#param_name);
+                    uri_string.push_str("=");
+                    write!(uri_string, "{}", #param_ident);
+                };
+                if p.required {
+                    write_param
+                } else {
+                    quote! {
+                        if let Some(#param_ident) = #param_ident {
+                            #write_param
+                        }
+                    }
+                }
+            });
+
+        let result_type = if let Some(ty) = &self.success_response.response_type {
+            TokenStream::from_str(&ty).unwrap()
+        } else {
+            quote! { () }
+        };
+
+        let success_status = self.success_response.status_code;
+
+        let result_converter = if let Some(ty) = &self.success_response.response_type {
+            quote! {
+                let response_bytes = hyper::body::to_bytes(response).await?;
+                Ok(serde_json::from_slice(&response_bytes).unwrap())
+            }
+        } else {
+            quote! { Ok(()) }
+        };
+
+        let result = quote! {
+            pub async fn #ident(&mut self, #(#parameters,)* #(#body),*) -> Result<#result_type, S::Error> {
+                #request_initializer
+                let mut uri_string = format!("{}{}", self.base_path, #path);
+                let mut is_first_query_param = true;
+                #(#query_params)*
+
+                *request.uri_mut() = uri_string.parse().unwrap();
+                let response = self.service.call(request).await?;
+
+                if response.status().as_u16() == #success_status {
+                    #result_converter
+                } else {
+                    unimplemented!()
+                }
             }
         };
         result.to_tokens(tokens);
