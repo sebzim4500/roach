@@ -19,6 +19,8 @@ impl ToTokens for Spec {
             use serde::{Serialize, Deserialize};
             use tower_service::Service;
             use std::fmt::Write;
+            use hyper::Method;
+            use hyper::header::HeaderValue;
 
             #[derive(Clone)]
             pub struct Client<S: Service<hyper::Request<hyper::Body>>> {
@@ -136,7 +138,10 @@ impl ToTokens for Endpoint {
         });
 
         let request_initializer = if let Some(request_body) = &self.request_body {
-            quote! { let mut request = hyper::Request::new(hyper::Body::from(serde_json::to_vec(body).unwrap())); }
+            quote! {
+                let mut request = hyper::Request::new(hyper::Body::from(serde_json::to_vec(body).unwrap()));
+                request.headers_mut().insert("Content-Type", HeaderValue::from_static("application/json"));
+            }
         } else {
             quote! { let mut request = hyper::Request::new(hyper::Body::empty()); }
         };
@@ -187,6 +192,8 @@ impl ToTokens for Endpoint {
             quote! { Ok(()) }
         };
 
+        let method_ident = format_ident!("{}", self.method.get_name());
+
         let result = quote! {
             pub async fn #ident(&mut self, #(#parameters,)* #(#body),*) -> Result<#result_type, S::Error> {
                 #request_initializer
@@ -195,6 +202,7 @@ impl ToTokens for Endpoint {
                 #(#query_params)*
 
                 *request.uri_mut() = uri_string.parse().unwrap();
+                *request.method_mut() = Method::#method_ident;
                 let response = self.service.call(request).await?;
 
                 if response.status().as_u16() == #success_status {

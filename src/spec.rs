@@ -18,6 +18,7 @@ impl Spec {
 pub struct Endpoint {
     pub name: String,
     pub path: String,
+    pub method: Method,
     pub parameters: Vec<Parameter>,
     pub request_body: Option<RequestBody>,
     pub success_response: Response,
@@ -286,6 +287,7 @@ impl<'s> SpecGenerator<'s> {
                 parameters,
                 request_body,
                 success_response,
+                method,
             });
         }
     }
@@ -368,7 +370,7 @@ fn type_from_reference(reference: &str) -> String {
 
 
 #[derive(Debug, Clone, Copy)]
-enum Method {
+pub enum Method {
     Get,
     Put,
     Post,
@@ -377,6 +379,21 @@ enum Method {
     Head,
     Patch,
     Trace,
+}
+
+impl Method {
+    pub fn get_name(&self) -> &str {
+        match self {
+            Method::Get => "GET",
+            Method::Put => "PUT",
+            Method::Post => "POST",
+            Method::Delete => "DELETE",
+            Method::Options => "OPTIONS",
+            Method::Head => "HEAD",
+            Method::Patch => "PATCH",
+            Method::Trace => "TRACE",
+        }
+    }
 }
 
 fn get_methods_from_type<'p>(url: &str, path: &'p PathItem) -> Vec<(String, Method, &'p Operation)> {
