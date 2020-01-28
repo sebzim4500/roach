@@ -59,7 +59,7 @@ impl ToTokens for TypeDefinition {
                 }
             },
             TypeKind::Enum { variants } => quote! {
-                #[derive(Serialize, Deserialize, Debug, Clone)]
+                #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
                 pub enum #ident {
                     #(#variants),*
                 }
