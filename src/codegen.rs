@@ -27,11 +27,21 @@ impl ToTokens for Spec {
             use hyper::Method;
             use hyper::header::HeaderValue;
 
-            #[derive(Clone)]
             pub struct Client<S: Service<hyper::Request<hyper::Body>>, E> {
                 service: S,
                 base_path: String,
                 _phantom_data: std::marker::PhantomData<E>,
+            }
+
+            /// Needed as otherwise there would be a `Clone` requirement on `E`
+            impl<S: Clone + Service<hyper::Request<hyper::Body>>, E> Clone for Client<S, E> {
+                fn clone(&self) -> Self {
+                    Self {
+                        service: self.service.clone(),
+                        base_path: self.base_path.clone(),
+                        _phantom_data: std::marker::PhantomData
+                    }
+                }
             }
 
             pub struct UnexpectedStatus(hyper::Response<hyper::Body>);
