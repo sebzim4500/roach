@@ -44,7 +44,7 @@ impl ToTokens for Spec {
                 }
             }
 
-            #[derive(Debug, Clone)]
+            #[derive(Debug)]
             pub struct UnexpectedStatus(pub hyper::Response<hyper::Body>);
 
             #(#type_definitions)*
