@@ -1,9 +1,14 @@
-use openapiv3::{OpenAPI, ReferenceOr, Schema, SchemaKind, Type, ObjectType, Components, Paths, PathItem, Operation, RequestBody, MediaType};
-use proc_macro2::{TokenStream, Ident};
-use quote::{quote, ToTokens, format_ident, TokenStreamExt};
-use inflector::cases::snakecase::to_snake_case;
+use crate::spec::{
+    Endpoint, ParameterType, Property, ScalarType, Spec, TypeDefinition, TypeKind, Variant,
+};
 use inflector::cases::pascalcase::to_pascal_case;
-use crate::spec::{Spec, TypeDefinition, TypeKind, ScalarType, Property, Variant, Endpoint, ParameterType};
+use inflector::cases::snakecase::to_snake_case;
+use openapiv3::{
+    Components, MediaType, ObjectType, OpenAPI, Operation, PathItem, Paths, ReferenceOr,
+    RequestBody, Schema, SchemaKind, Type,
+};
+use proc_macro2::{Ident, TokenStream};
+use quote::{format_ident, quote, ToTokens, TokenStreamExt};
 use std::str::FromStr;
 //
 //trait ToTokens {
@@ -23,18 +28,24 @@ impl ToTokens for Spec {
             use hyper::header::HeaderValue;
 
             #[derive(Clone)]
-            pub struct Client<S: Service<hyper::Request<hyper::Body>>> {
+            pub struct Client<S: Service<hyper::Request<hyper::Body>>, E> {
                 service: S,
                 base_path: String,
+                _phantom_data: std::marker::PhantomData<E>,
             }
+
+            pub struct UnexpectedStatus(hyper::Response<hyper::Body>);
 
             #(#type_definitions)*
 
-            impl<S> Client<S> where
+            impl<S, E> Client<S, E> where
                     S: Service<hyper::Request<hyper::Body>, Response = hyper::Response<hyper::Body>>,
-                    S::Error: From<hyper::Error>, {
+                    E: From<hyper::Error>,
+                    E: From<S::Error>,
+                    E: From<serde_json::Error>,
+                    E: From<UnexpectedStatus> {
                 pub fn new(service: S, base_path: String) -> Self {
-                    Self { service, base_path }
+                    Self { service, base_path, _phantom_data: std::marker::PhantomData }
                 }
 
                 #(#endpoints)*
@@ -51,7 +62,7 @@ impl ToTokens for TypeDefinition {
             TypeKind::Alias(type_name) => {
                 let type_ident = TokenStream::from_str(&type_name).unwrap();
                 quote! { type #ident = #type_ident; }
-            },
+            }
             TypeKind::Object { properties } => quote! {
                 #[derive(Serialize, Deserialize, Debug, Clone)]
                 pub struct #ident {
@@ -74,7 +85,8 @@ impl ToTokens for ScalarType {
         (match self {
             ScalarType::String => quote! { String },
             ScalarType::Number => quote! { f64 },
-        }).to_tokens(tokens);
+        })
+        .to_tokens(tokens);
     }
 }
 
@@ -118,14 +130,18 @@ impl ToTokens for Endpoint {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let ident = format_ident!("{}", self.name);
 
-        let body = self.request_body.as_ref().map(|request_body| {
-            let request_body_type = format_ident!("{}", request_body.type_name);
-            if request_body.required {
-                quote! { body: &#request_body_type }
-            } else {
-                quote! { body: Option<&#request_body_type> }
-            }
-        }).into_iter();
+        let body = self
+            .request_body
+            .as_ref()
+            .map(|request_body| {
+                let request_body_type = format_ident!("{}", request_body.type_name);
+                if request_body.required {
+                    quote! { body: &#request_body_type }
+                } else {
+                    quote! { body: Option<&#request_body_type> }
+                }
+            })
+            .into_iter();
 
         let parameters = self.parameters.iter().map(|parameter| {
             let ident = format_ident!("{}", parameter.name);
@@ -148,7 +164,9 @@ impl ToTokens for Endpoint {
 
         let path = &self.path;
 
-        let query_params = self.parameters.iter()
+        let query_params = self
+            .parameters
+            .iter()
             .filter(|p| p.parameter_type == ParameterType::Query)
             .map(|p| {
                 let param_name = &p.original_name;
@@ -186,7 +204,7 @@ impl ToTokens for Endpoint {
         let result_converter = if let Some(ty) = &self.success_response.response_type {
             quote! {
                 let response_bytes = hyper::body::to_bytes(response).await?;
-                Ok(serde_json::from_slice(&response_bytes).unwrap())
+                Ok(serde_json::from_slice(&response_bytes)?)
             }
         } else {
             quote! { Ok(()) }
@@ -195,7 +213,7 @@ impl ToTokens for Endpoint {
         let method_ident = format_ident!("{}", self.method.get_name());
 
         let result = quote! {
-            pub async fn #ident(&mut self, #(#parameters,)* #(#body),*) -> Result<#result_type, S::Error> {
+            pub async fn #ident(&mut self, #(#parameters,)* #(#body),*) -> Result<#result_type, E> {
                 #request_initializer
                 let mut uri_string = format!("{}{}", self.base_path, #path);
                 let mut is_first_query_param = true;
@@ -208,7 +226,7 @@ impl ToTokens for Endpoint {
                 if response.status().as_u16() == #success_status {
                     #result_converter
                 } else {
-                    unimplemented!()
+                    Err(UnexpectedStatus(response).into())
                 }
             }
         };

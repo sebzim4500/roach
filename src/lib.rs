@@ -1,17 +1,20 @@
-use std::path::Path;
-use std::io;
-use std::fs::File;
-use std::io::{Read, Write};
+use crate::spec::Spec;
 use openapiv3::OpenAPI;
 use proc_macro2::TokenStream;
-use std::process::{Command, Stdio};
-use crate::spec::Spec;
 use quote::ToTokens;
+use std::fs::File;
+use std::io;
+use std::io::{Read, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 mod codegen;
 mod spec;
 
-pub fn generate_code_from_file(input: impl AsRef<Path>, output: impl AsRef<Path>) -> io::Result<()> {
+pub fn generate_code_from_file(
+    input: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+) -> io::Result<()> {
     let path_ref = input.as_ref();
     let mut schema_text = String::new();
     File::open(input)?.read_to_string(&mut schema_text)?;
@@ -35,11 +38,13 @@ fn format(code: &str) -> Vec<u8> {
         .arg("2018")
         .arg("--config")
         .arg("normalize_doc_attributes=true")
-        .spawn().unwrap();
+        .spawn()
+        .unwrap();
     cmd.stdin
         .as_mut()
         .unwrap()
-        .write_all(code.as_bytes()).unwrap();
+        .write_all(code.as_bytes())
+        .unwrap();
     cmd.wait_with_output().unwrap().stdout
 }
 
